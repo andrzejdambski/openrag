@@ -1,20 +1,17 @@
 # PR #1161 review measurements
 
-The review checks used the configured Mistral model and the two PDFs already indexed in `issue751-e2e-20261008`.
+The October 9 prompt evaluation and held-out checks are in the linked result files. The direct follow-up below addresses Andy’s current UI, latency, recall, and nit comments.
 
-| Check | Result |
-| --- | --- |
-| Cases 64, 68, 73, 80: count match against `develop` labels | 0/4 |
-| Same generated outputs: count match against the new labels | 4/4 |
-| Same outputs: semantic coverage against either label set | 4/4 |
-| One query per compared item, with each shared criterion preserved | 4/4 |
+## October 12 live comparison
 
-The four changed labels each ask for two item-focused queries. The 81-case run scored 75/81 on query count and 74/81 on semantic coverage. Three judge calls returned no structured result (cases 50, 41, and 45), so those coverage results remain inconclusive. The rewritten held-out cases 79 and 81 both passed count and coverage checks; the held-out test now checks both evaluation datasets.
+The bundled contextualizer now validates in the admin UI, including both uses of `max_query_subqueries`. We tested the UI against the actual bundled template.
 
-For retrieval, two comparison questions each had the two PDFs as their manually judged relevant sources, one per compared method. With a two-hit search budget, `develop` retrieved 2/4 relevant sources; the candidate split retrieved 4/4. The rebuilt chat service also returned both source PDFs for both questions. Search results include adjacent context chunks, so this is source-file recall over this small set, not a general chunk-level recall claim.
+For latency, `develop` (`db7f6c66`) and candidate (`d9db441e`) each ran in a fresh Compose project with branch-specific prompt seeds and storage. Both indexed the same two research PDFs. We replayed the same three comparison questions three times per revision, using streamed one-token replies and excluding one warm-up request per revision. Median TTFT was **3.82 s on develop** and **4.17 s on the candidate** (+0.35 s / 9.2% in this run). This small sample does not support a latency-improvement claim.
 
-Warm end-to-end chat TTFT was measured on three comparison questions, three requests each, using streamed responses capped at one answer token. Median TTFT was 4.45 s on head `16be4aa` and 4.18 s on the candidate build. The candidate's first request after container restart took 20.1 s; it was recorded separately from the warmed sample set.
+For source recall on the same two papers, both revisions retrieved both relevant PDFs for both prior example questions (2/2 each). On three new comparisons over the five supplied `mini-data` PDFs, `develop` retrieved 6/6 relevant source files and the candidate retrieved 5/6 (0.83). The candidate missed the soybean document on one comparison. This is a small source-level sample, not a general recall claim.
 
-The model now rejects an over-cap query list, retries with instructions to group periods without losing coverage, and falls back to the complete user query if retry fails. The previous bundled prompt hash is registered as superseded so existing default prompts refresh on upgrade.
+The evaluator and production retry now share the same over-cap instruction. The stale query-cap comment is corrected.
 
-Validation: 363 focused unit tests passed; Ruff check, Ruff format check, and `git diff --check` passed. Detailed outputs are in [the label evaluation](results/andy_review_labels_20261009.json), [the full-run summary](results/andy_review_full_summary_20261009.json), [the recall run](results/andy_review_recall_20261009.json), and [the TTFT samples](results/andy_review_latency_20261009.json).
+Validation: 300 focused Python tests and 435 UI tests passed; Ruff check, Ruff format check, and `git diff --check` passed.
+
+Detailed evidence: [label evaluation](results/andy_review_labels_20261009.json), [full prompt run](results/andy_review_full_summary_20261009.json), [October 9 recall](results/andy_review_recall_20261009.json), [October 9 latency](results/andy_review_latency_20261009.json), [current recall comparison](results/andy_review_recall_20261012.json), and [current TTFT comparison](results/andy_review_latency_20261012.json).
