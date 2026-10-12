@@ -148,6 +148,7 @@ class ConnectionManager:
     def _ensure_database_exists(self) -> None:
         """Create the configured database before opening the asyncpg pool."""
         from sqlalchemy import URL
+        from sqlalchemy.exc import SQLAlchemyError
         from sqlalchemy_utils import create_database, database_exists
 
         url = URL.create(
@@ -159,8 +160,18 @@ class ConnectionManager:
             database=self._conn_kwargs["database"],
         )
         if not database_exists(url):
-            create_database(url)
-            logger.info(f"Created Postgres database `{self._conn_kwargs['database']}`.")
+            try:
+                create_database(url)
+            except SQLAlchemyError:
+                # Multiple OpenRAG processes can start against an empty Postgres
+                # instance at once. If another process creates this database
+                # after our initial check, Postgres rejects our CREATE DATABASE;
+                # continue only when the requested database now exists.
+                if not database_exists(url):
+                    raise
+                logger.info(f"Postgres database `{self._conn_kwargs['database']}` was created concurrently.")
+            else:
+                logger.info(f"Created Postgres database `{self._conn_kwargs['database']}`.")
 
     async def shutdown(self) -> None:
         if self._pool is None:

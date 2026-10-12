@@ -2,6 +2,7 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 from services.persistence.connection import ConnectionManager
+from sqlalchemy.exc import IntegrityError
 
 
 class RDBConfigStub:
@@ -38,6 +39,46 @@ def test_ensure_database_exists_skips_existing_database(monkeypatch):
     manager._ensure_database_exists()
 
     create_database.assert_not_called()
+
+
+def test_ensure_database_exists_tolerates_concurrent_creation(monkeypatch):
+    manager = ConnectionManager(RDBConfigStub())
+    database_exists = Mock(side_effect=[False, True])
+    create_database = Mock(
+        side_effect=IntegrityError(
+            "CREATE DATABASE partitions_for_collection_test",
+            {},
+            Exception("duplicate key value violates pg_database_datname_index"),
+        ),
+    )
+
+    monkeypatch.setattr("sqlalchemy_utils.database_exists", database_exists)
+    monkeypatch.setattr("sqlalchemy_utils.create_database", create_database)
+
+    manager._ensure_database_exists()
+
+    assert database_exists.call_count == 2
+    create_database.assert_called_once()
+
+
+def test_ensure_database_exists_reraises_if_create_fails_and_database_is_missing(monkeypatch):
+    manager = ConnectionManager(RDBConfigStub())
+    database_exists = Mock(side_effect=[False, False])
+    create_error = IntegrityError(
+        "CREATE DATABASE partitions_for_collection_test",
+        {},
+        Exception("permission denied"),
+    )
+    create_database = Mock(side_effect=create_error)
+
+    monkeypatch.setattr("sqlalchemy_utils.database_exists", database_exists)
+    monkeypatch.setattr("sqlalchemy_utils.create_database", create_database)
+
+    with pytest.raises(IntegrityError) as exc_info:
+        manager._ensure_database_exists()
+
+    assert exc_info.value is create_error
+    assert database_exists.call_count == 2
 
 
 @pytest.mark.asyncio
