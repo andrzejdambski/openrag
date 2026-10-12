@@ -205,6 +205,7 @@ async def test_eval_retries_oversized_query_lists_before_scoring():
 
     assert len(generator.calls) == 2
     assert "coarser contiguous intervals" in generator.calls[1][0]["content"]
+    assert generator.calls[1][0]["content"].endswith(evaluator.QUERY_CONTEXTUALIZER_OVER_CAP_RETRY_INSTRUCTION)
     assert [query.removeprefix("quarter ") for query in result.generated_queries] == ["1", "2", "3", "4"]
     assert result.decomposition_count_match is True
     assert result.generation_fallback is None

@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
 
-# Bound concurrent retrieval fan-out; keep valid queries if a model exceeds it.
+# Maximum number of search queries accepted for one retrieval request.
 MAX_QUERY_SUBQUERIES = 8
 
 

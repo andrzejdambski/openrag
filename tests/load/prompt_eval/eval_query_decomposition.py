@@ -76,9 +76,13 @@ MAX_QUERY_SUBQUERIES = _QUERY_SCHEMA.MAX_QUERY_SUBQUERIES
 calendar_anchors = _load_production_module(
     "prompt_eval_production_calendar_anchors", _OPENRAG / "core/prompts/calendar_anchors.py"
 ).calendar_anchors
-QUERY_CONTEXTUALIZER_JSON_HINT = _load_production_module(
+_QUERY_CONTEXTUALIZER_HINTS = _load_production_module(
     "prompt_eval_production_contextualizer_hint", _OPENRAG / "core/prompts/query_contextualizer_hint.py"
-).QUERY_CONTEXTUALIZER_JSON_HINT
+)
+QUERY_CONTEXTUALIZER_JSON_HINT = _QUERY_CONTEXTUALIZER_HINTS.QUERY_CONTEXTUALIZER_JSON_HINT
+QUERY_CONTEXTUALIZER_OVER_CAP_RETRY_INSTRUCTION = (
+    _QUERY_CONTEXTUALIZER_HINTS.QUERY_CONTEXTUALIZER_OVER_CAP_RETRY_INSTRUCTION
+)
 
 load_dotenv()
 
@@ -280,15 +284,11 @@ async def _generate_queries(
         except Exception as exc:
             last_error = exc
             if attempt == 1 and _is_oversized_query_list_error(exc):
-                retry_instruction = (
-                    f"The previous JSON was rejected because it contained more than "
-                    f"{MAX_QUERY_SUBQUERIES} sub-queries. Regenerate the complete result within the cap. "
-                    "For time ranges, group adjacent periods into coarser contiguous intervals that cover "
-                    "the entire range. For other facets, group related details while retaining every item "
-                    "and shared criterion. Never omit trailing periods or any item. Return only the full JSON."
-                )
                 messages = [
-                    {**messages[0], "content": f"{messages[0]['content']}\n\n{retry_instruction}"},
+                    {
+                        **messages[0],
+                        "content": f"{messages[0]['content']}\n\n{QUERY_CONTEXTUALIZER_OVER_CAP_RETRY_INSTRUCTION}",
+                    },
                     *messages[1:],
                 ]
 

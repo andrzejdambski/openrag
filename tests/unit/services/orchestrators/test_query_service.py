@@ -21,6 +21,7 @@ from core.config.retrieval_pipeline import RetrievalPipelineConfig
 from core.models.chunk import Chunk
 from core.models.workspace import WorkspaceScope
 from core.prompts import EMPTY_CONTEXT_MESSAGE
+from core.prompts.query_contextualizer_hint import QUERY_CONTEXTUALIZER_OVER_CAP_RETRY_INSTRUCTION
 from core.utils.exceptions import ContextWindowExceededError, WorkspaceNotFoundError
 from services.orchestrators.query_service import QueryService
 
@@ -494,6 +495,7 @@ async def test_generate_query_retries_oversized_subqueries_with_coarser_periods(
     assert "coarser contiguous intervals" in llm.chat_calls[1][0][0]["content"]
     assert "cover the entire range" in llm.chat_calls[1][0][0]["content"]
     assert "Never omit trailing periods or any item" in llm.chat_calls[1][0][0]["content"]
+    assert llm.chat_calls[1][0][0]["content"].endswith(QUERY_CONTEXTUALIZER_OVER_CAP_RETRY_INSTRUCTION)
     assert llm.chat_calls[0][1]["max_completion_tokens"] == 1024
 
 

@@ -55,7 +55,10 @@ from core.prompts import (
     prepend_system_prompt,
     tool_definition_tokens,
 )
-from core.prompts.query_contextualizer_hint import QUERY_CONTEXTUALIZER_JSON_HINT
+from core.prompts.query_contextualizer_hint import (
+    QUERY_CONTEXTUALIZER_JSON_HINT,
+    QUERY_CONTEXTUALIZER_OVER_CAP_RETRY_INSTRUCTION,
+)
 from core.utils.exceptions import ContextWindowExceededError, ValidationError, WorkspaceNotFoundError
 from core.utils.logging import get_logger
 from core.utils.source_filtering import (
@@ -543,15 +546,11 @@ class QueryService:
             except Exception as exc:
                 if attempt == 1:
                     if _is_oversized_query_list_error(exc):
-                        retry_instruction = (
-                            f"The previous JSON was rejected because it contained more than "
-                            f"{MAX_QUERY_SUBQUERIES} sub-queries. Regenerate the complete result within the cap. "
-                            "For time ranges, group adjacent periods into coarser contiguous intervals that cover "
-                            "the entire range. For other facets, group related details while retaining every item "
-                            "and shared criterion. Never omit trailing periods or any item. Return only the full JSON."
-                        )
                         llm_messages = [
-                            {**llm_messages[0], "content": f"{llm_messages[0]['content']}\n\n{retry_instruction}"},
+                            {
+                                **llm_messages[0],
+                                "content": f"{llm_messages[0]['content']}\n\n{QUERY_CONTEXTUALIZER_OVER_CAP_RETRY_INSTRUCTION}",
+                            },
                             *llm_messages[1:],
                         ]
                         logger.warning("Query generation exceeded the sub-query limit — retrying with coarser coverage")

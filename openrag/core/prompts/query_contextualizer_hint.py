@@ -19,3 +19,10 @@ QUERY_CONTEXTUALIZER_JSON_HINT = (
     "when the contextualizer rules require a split. "
     "If uncertain, use intent other and require retrieval."
 )
+
+QUERY_CONTEXTUALIZER_OVER_CAP_RETRY_INSTRUCTION = (
+    f"The previous JSON was rejected because it contained more than {MAX_QUERY_SUBQUERIES} sub-queries. "
+    "Regenerate the complete result within the cap. For time ranges, group adjacent periods into coarser "
+    "contiguous intervals that cover the entire range. For other facets, group related details while retaining "
+    "every item and shared criterion. Never omit trailing periods or any item. Return only the full JSON."
+)
