@@ -84,6 +84,11 @@ QUERY_CONTEXTUALIZER_OVER_CAP_RETRY_INSTRUCTION = (
     _QUERY_CONTEXTUALIZER_HINTS.QUERY_CONTEXTUALIZER_OVER_CAP_RETRY_INSTRUCTION
 )
 
+QUERY_CONTEXTUALIZER_TRUNCATED_RETRY_INSTRUCTION = (
+    _QUERY_CONTEXTUALIZER_HINTS.QUERY_CONTEXTUALIZER_TRUNCATED_RETRY_INSTRUCTION
+)
+contextualizer_budget_hint = _QUERY_CONTEXTUALIZER_HINTS.contextualizer_budget_hint
+
 load_dotenv()
 
 # ---------------------------------------------------------------------------
@@ -172,6 +177,7 @@ class CaseResult:
     coverage_reasoning: str | None
     expected_queries: list[str]
     generated_queries: list[str]
+    generated_query_objects: list[dict] = field(default_factory=list)
     comparison_policy_passed: bool | None = None
     comparison_policy_reason: str | None = None
     develop_expected_queries: list[str] | None = None
@@ -213,7 +219,7 @@ def build_llm_messages(prompt: str, messages: list[dict]) -> list[dict]:
     """Build the prompt messages sent by QueryService.generate_query."""
     chat_history = "".join(f"{m['role']}: {m['content']}\n" for m in messages)
     return [
-        {"role": "system", "content": prompt + QUERY_CONTEXTUALIZER_JSON_HINT},
+        {"role": "system", "content": prompt + QUERY_CONTEXTUALIZER_JSON_HINT + contextualizer_budget_hint(1024)},
         {"role": "user", "content": f"Here is the chat history: \n{chat_history}\n"},
     ]
 
@@ -280,14 +286,24 @@ async def _generate_queries(
     for attempt in (1, 2):
         try:
             response = await generator.ainvoke(messages)
-            return SearchQueries.model_validate_json(_json_slice(str(response.content))), None
+            if getattr(response, "response_metadata", {}).get("finish_reason") == "length":
+                raise ValueError("Contextualizer response truncated")
+            result = SearchQueries.model_validate_json(_json_slice(str(response.content)))
+            if result.requires_retrieval and not result.query_list:
+                result.query_list = [Query(query=last_message)]
+            return result, None
         except Exception as exc:
             last_error = exc
-            if attempt == 1 and _is_oversized_query_list_error(exc):
+            if attempt == 1:
+                instruction = (
+                    QUERY_CONTEXTUALIZER_OVER_CAP_RETRY_INSTRUCTION
+                    if _is_oversized_query_list_error(exc)
+                    else QUERY_CONTEXTUALIZER_TRUNCATED_RETRY_INSTRUCTION
+                )
                 messages = [
                     {
                         **messages[0],
-                        "content": f"{messages[0]['content']}\n\n{QUERY_CONTEXTUALIZER_OVER_CAP_RETRY_INSTRUCTION}",
+                        "content": f"{messages[0]['content']}\n\n{instruction}",
                     },
                     *messages[1:],
                 ]
@@ -322,6 +338,18 @@ def score_comparison_policy(policy: dict | None, generated: list[str]) -> tuple[
 
     def normalize(value: str) -> str:
         return re.sub(r"[^a-z0-9]+", " ", value.casefold()).strip()
+
+    if len(items) > MAX_QUERY_SUBQUERIES:
+        if not generated or len(generated) > MAX_QUERY_SUBQUERIES:
+            return False, "Grouped comparison must stay within the query cap."
+        named = set()
+        for query in generated:
+            text = normalize(query)
+            matched = {item for item in items if normalize(item) in text}
+            if not matched or any(normalize(criterion) not in text for criterion in criteria):
+                return False, "Every group must name compared items and every shared criterion."
+            named.update(matched)
+        return (True, None) if len(named) == len(items) else (False, "Grouped queries omit compared items.")
 
     if len(generated) != len(items):
         return False, f"Expected one query for each of {len(items)} compared items; got {len(generated)}."
@@ -388,6 +416,7 @@ async def run_case(
     n_expected = len(expected_queries)
 
     generated_queries: list[str] = []
+    generated_query_objects: list[dict] = []
     n_generated = 0
     generation_fallback: str | None = None
     error: str | None = None
@@ -399,6 +428,7 @@ async def run_case(
             llm_messages,
             last_message,
         )
+        generated_query_objects = [q.model_dump() for q in output.query_list]
         generated_queries = [q.query for q in output.query_list]
         n_generated = len(generated_queries)
     except Exception as exc:
@@ -450,6 +480,7 @@ async def run_case(
         coverage_reasoning=coverage_reasoning,
         expected_queries=expected_queries,
         generated_queries=generated_queries,
+        generated_query_objects=generated_query_objects,
         comparison_policy_passed=comparison_policy_passed,
         comparison_policy_reason=comparison_policy_reason,
         develop_expected_queries=develop_expected_queries,

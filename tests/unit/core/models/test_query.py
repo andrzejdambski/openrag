@@ -54,3 +54,21 @@ def test_search_queries_rejects_overflow_instead_of_truncating():
 def test_an_unparseable_value_is_dropped_and_the_rest_kept():
     assert _filter((">=", "last monday"), ("<", "2026-09-14")) == 'created_at < ISO "2026-09-14T00:00:00+00:00"'
     assert _filter((">=", "last monday")) is None
+
+
+@pytest.mark.parametrize("as_models", [False, True])
+def test_blank_queries_are_removed_before_enforcing_cap(as_models):
+    entries = [
+        {"query": f"facet {i}", "temporal_filters": [{"operator": ">=", "value": "2026-01-01"}]} for i in range(8)
+    ]
+    entries.insert(3, {"query": " \n\t"})
+    if as_models:
+        entries = [Query(**entry) for entry in entries]
+    result = SearchQueries(query_list=entries)
+    assert len(result.query_list) == 8
+    assert all(q.to_milvus_filter() for q in result.query_list)
+
+
+def test_blank_normalization_does_not_hide_invalid_entries():
+    with pytest.raises(ValidationError):
+        SearchQueries(query_list=[{"query": None}])

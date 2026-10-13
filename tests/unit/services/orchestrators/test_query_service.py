@@ -134,7 +134,7 @@ class FakeWorkspace:
         # dict {partition: set(file_ids)} => partition-scoped existence.
         self._existing = existing
 
-    async def get_workspace(self, partition, wid):
+    async def get_workspace(self, wid):
         return None
 
     async def resolve_scope(self, workspace_id, allowed_partitions):
@@ -524,7 +524,7 @@ async def test_contextualizer_prompt_allows_bounded_conceptual_splits():
     assert "Separate facts about independently documented entities" in contextualizer_prompt
     assert "Independent comparisons" in contextualizer_prompt
     assert "practical options, methods, or concepts" in contextualizer_prompt
-    assert "ALWAYS emit exactly one sub-query per item" in contextualizer_prompt
+    assert "emit exactly one sub-query per item when there are at most 8 items" in contextualizer_prompt
     assert "Do not combine both sides into one query" in contextualizer_prompt
     assert "Return no more than 8 sub-queries total" in contextualizer_prompt
     assert contextualizer_prompt.index("Runtime calendar context") > contextualizer_prompt.index("Examples:")
@@ -3478,8 +3478,7 @@ async def test_require_retrieval_keeps_generated_filters_and_allows_no_matches(h
 async def test_generate_query_hands_the_contextualizer_precomputed_calendar_anchors():
     """ "Last week" must reach Milvus as Monday-to-Monday. Mistral Small resolved
     it to the past seven days when left to do the arithmetic, so the system
-    prompt now carries the boundaries pre-computed through the template's
-    ``{calendar_anchors}`` placeholder.
+    prompt now carries pre-computed boundaries alongside the current date.
     """
     payload = json.dumps({"requires_retrieval": True, "query_list": [{"query": "q", "temporal_filters": None}]})
     llm = FakeLLM(chat_responses=[payload])
@@ -3493,6 +3492,14 @@ async def test_generate_query_hands_the_contextualizer_precomputed_calendar_anch
     assert "- last week [" in system["content"]
     # The bundled template points its resolution rules at those anchors.
     assert "copy the matching anchor under Current date verbatim" in system["content"]
+
+
+def test_bundled_query_prompt_accepts_v22_format_arguments():
+    """Older pods must format a refreshed shared default during rolling upgrades."""
+    template = _disk_prompt_service()._disk_seed("query_contextualizer")
+    rendered = template.format(query_language="en", current_date="Monday, September 28, 2026")
+    assert "Monday, September 28, 2026" in rendered
+    assert "{calendar_anchors}" not in rendered
 
 
 @pytest.mark.asyncio
@@ -3522,3 +3529,93 @@ async def test_generate_query_reads_the_clock_in_utc(monkeypatch):
     assert "Current date: Wednesday, September 16, 2026, 23:30:00" in system
     assert "- today 2026-09-16T00:00:00+00:00, tomorrow 2026-09-17T00:00:00+00:00" in system
     assert "- last week [2026-09-07, 2026-09-14)" in system
+
+
+@pytest.mark.asyncio
+async def test_truncated_contextualizer_retries_compactly_with_same_512_budget():
+    llm = FakeLLM(
+        chat_responses=[
+            {"content": '{"query_list":[', "finish_reason": "length"},
+            json.dumps(
+                {
+                    "query_list": [
+                        {
+                            "query": "all requested facets",
+                            "temporal_filters": [
+                                {"operator": ">=", "value": "2026-01-01"},
+                                {"operator": "<", "value": "2027-01-01"},
+                            ],
+                        }
+                    ]
+                }
+            ),
+        ]
+    )
+    svc = _svc(llm=llm, mode="ChatBotRag")
+    svc._max_contextualized_query_len = 512
+    result = await svc.generate_query([{"role": "user", "content": "Compare the documents published in 2026"}])
+    assert result.query_list[0].to_milvus_filter()
+    first, retry = llm.chat_calls
+    assert first[1]["max_completion_tokens"] == retry[1]["max_completion_tokens"] == 512
+    assert "512 output tokens" in first[0][0]["content"]
+    assert "truncated" in retry[0][0]["content"]
+    assert "temporal filters" in retry[0][0]["content"]
+    assert retry[0][0]["content"] != first[0][0]["content"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("budget", [1, 2, 8])
+async def test_web_query_budget_preserves_all_facets(budget):
+    from core.models.query import Query, SearchQueries
+
+    web = FakeWeb()
+    svc = _svc(web=web)
+    svc._config.websearch = SimpleNamespace(max_queries=budget)
+    queries = SearchQueries(query_list=[Query(query=f"facet {i}") for i in range(8)])
+    await svc._gather_rag_and_web(queries, ["p"], 5, None)
+    assert len(web.calls) == budget
+    assert all(f"facet {i}" in " ".join(web.calls) for i in range(8))
+
+
+def test_bundled_comparison_rule_groups_more_than_eight_items():
+    template = _disk_prompt_service()._disk_seed("query_contextualizer")
+    assert "more than 8 items" in template
+    assert "retain every item and shared criterion" in template
+
+
+@pytest.mark.asyncio
+async def test_blank_generated_queries_fall_back_before_any_retrieval_path():
+    llm = FakeLLM(chat_responses=[json.dumps({"query_list": [{"query": " \n"}]})])
+    svc = _svc(llm=llm, mode="ChatBotRag")
+    result = await svc.generate_query([{"role": "user", "content": "Find safety reports"}])
+    assert [q.query for q in result.query_list] == ["Find safety reports"]
+
+
+@pytest.mark.asyncio
+async def test_web_only_budget_deduplicates_and_combines_contextualized_queries():
+    web = FakeWeb()
+    llm = FakeLLM(
+        chat_responses=[json.dumps({"query_list": [{"query": q} for q in ["aspect A", "aspect A", "aspect B"]]})]
+    )
+    svc = _svc(llm=llm, web=web, mode="ChatBotRag")
+    await svc._prepare_chat(
+        None, {"messages": [{"role": "user", "content": "compare them"}], "metadata": {"websearch": True}}
+    )
+    assert web.calls == ["aspect A; aspect B"]
+
+
+@pytest.mark.parametrize("calendar_arguments", [{}, {"calendar_anchors": "anchors"}])
+def test_refreshed_template_is_compatible_with_older_renderer_arguments(calendar_arguments):
+    from core.models.query import MAX_QUERY_SUBQUERIES
+
+    template = _disk_prompt_service()._disk_seed("query_contextualizer")
+    rendered = template.format(query_language="en", current_date="2026-10-13", **calendar_arguments)
+    assert f"Return no more than {MAX_QUERY_SUBQUERIES} sub-queries total" in rendered
+
+
+def test_512_output_budget_limits_initial_fanout_before_truncation():
+    from core.prompts.query_contextualizer_hint import contextualizer_budget_hint
+
+    hint = contextualizer_budget_hint(512)
+    assert "at most 4 sub-queries" in hint
+    assert "takes precedence" in hint

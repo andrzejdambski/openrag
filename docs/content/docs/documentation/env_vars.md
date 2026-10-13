@@ -510,6 +510,9 @@ To customize prompt:
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
 | `PROMPTS_DIR` | str | (bundled `openrag/prompts/templates`) | Path to a directory of prompt templates. Unset uses the templates bundled in the package; set it only to override with a custom directory. |
+| `PROMPTS_REFRESH_DEFAULTS` | bool | `true` | Refresh a saved default only when it still matches an older bundled version. Set `false` during a staged rollout if old instances must keep using their existing prompt; re-enable after they stop. Stale defaults remain visible in startup warnings. |
+
+Refreshing a default changes the saved database value. Turning the switch off or rolling back the image does not restore its earlier text; restore that text from the earlier release if you need the old behavior. Presets and partitions that fall back to the global default use the refreshed text; prompts they select by name keep their own text.
 
 ### Logging
 OpenRAG logs with Loguru on the process **stderr**, and nowhere else. Docker
@@ -607,6 +610,7 @@ Web search allows the LLM to augment RAG document context with live web results.
 | `WEBSEARCH_BASE_URL` | `str` | (provider default) | Base URL of the web search provider API. |
 | `WEBSEARCH_TOP_K` | `int` | `5` | Number of web search results to return. |
 | `WEBSEARCH_LANG` | `str` | `fr-FR` | Language/market code for web search queries. |
+| `WEBSEARCH_MAX_QUERIES` | `int` | `1` | Maximum provider calls per user request (1–8). Contextualized queries are combined when necessary to retain all facets within this budget. Aggregate traffic across replicas must still fit the provider quota. |
 | `WEBSEARCH_MAX_TOKENS` | `int` | `2000` | Maximum token budget for all web sources combined in the LLM context. This budget is reserved from the global context window when web results are present. |
 | `WEBSEARCH_FETCH_CONTENT` | `bool` | `true` | When enabled, fetches actual page content from the top URLs instead of relying on short search snippets. |
 | `WEBSEARCH_FETCH_MAX_RESULTS` | `int` | `3` | Number of top URLs to fetch content from (the remaining results use their search snippet). |

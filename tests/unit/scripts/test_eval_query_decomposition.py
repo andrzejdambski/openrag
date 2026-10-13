@@ -36,7 +36,7 @@ def test_contextualizer_splits_comparisons_and_coarsens_long_trends():
     rendered = evaluator.format_prompt(template_path.read_text(), "Compare method A and method B")
 
     assert "Independent comparisons" in rendered
-    assert "ALWAYS emit exactly one sub-query per item" in rendered
+    assert "emit exactly one sub-query per item when there are at most 8 items" in rendered
     assert "Carry every shared criterion into each item-focused query" in rendered
     assert "Do not combine both sides into one query" in rendered
     assert "split the comparison into one query per criterion" in rendered
@@ -265,3 +265,12 @@ def test_issue_751_eval_cases_validate_against_the_production_query_schema():
 
     for case in cases:
         evaluator.SearchQueries.model_validate(case["expected_queries"])
+
+
+@pytest.mark.parametrize("count", [9, 10])
+def test_comparison_policy_allows_grouping_only_with_complete_item_coverage(count):
+    items = [f"material-{i:02d}" for i in range(count)]
+    policy = {"items": items, "shared_criteria": ["cost", "durability"]}
+    groups = [f"{' and '.join(items[:5])}: cost and durability", f"{' and '.join(items[5:])}: cost and durability"]
+    assert evaluator.score_comparison_policy(policy, groups) == (True, None)
+    assert evaluator.score_comparison_policy(policy, groups[:1])[0] is False

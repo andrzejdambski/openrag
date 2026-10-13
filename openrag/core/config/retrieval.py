@@ -130,6 +130,7 @@ class _BaseWebSearchConfig(ConfigMixin):
     top_k: int = 5
     lang: str = "fr-FR"
     max_tokens: int = 2000
+    max_queries: int = Field(default=1, ge=1, le=8)
     fetch_content: bool = True
     fetch_max_results: int = 3
     fetch_timeout: float = 1.0

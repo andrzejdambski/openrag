@@ -58,6 +58,8 @@ from core.prompts import (
 from core.prompts.query_contextualizer_hint import (
     QUERY_CONTEXTUALIZER_JSON_HINT,
     QUERY_CONTEXTUALIZER_OVER_CAP_RETRY_INSTRUCTION,
+    QUERY_CONTEXTUALIZER_TRUNCATED_RETRY_INSTRUCTION,
+    contextualizer_budget_hint,
 )
 from core.utils.exceptions import ContextWindowExceededError, ValidationError, WorkspaceNotFoundError
 from core.utils.logging import get_logger
@@ -519,16 +521,27 @@ class QueryService:
         # created_at timestamps, and near midnight the local date is a
         # different day.
         now = datetime.now(UTC)
+        anchors = calendar_anchors(now)
+        current_date = now.strftime("%A, %B %d, %Y, %H:%M:%S")
+        if "{calendar_anchors}" not in contextualizer:
+            # Older pods know only current_date. Keep the saved default
+            # renderable by them while newer pods still supply exact ranges.
+            current_date = f"{current_date}\n{anchors}"
         prompt = contextualizer.format(
             query_language=detect_language(last_user),
             max_query_subqueries=MAX_QUERY_SUBQUERIES,
-            current_date=now.strftime("%A, %B %d, %Y, %H:%M:%S"),
+            current_date=current_date,
             # Pre-computed week/month/year ranges: the model must not do the
             # calendar arithmetic itself (see core.prompts.calendar_anchors).
-            calendar_anchors=calendar_anchors(now),
+            calendar_anchors=anchors,
         )
         llm_messages = [
-            {"role": "system", "content": prompt + QUERY_CONTEXTUALIZER_JSON_HINT},
+            {
+                "role": "system",
+                "content": prompt
+                + QUERY_CONTEXTUALIZER_JSON_HINT
+                + contextualizer_budget_hint(self._max_contextualized_query_len),
+            },
             {"role": "user", "content": f"Here is the chat history: \n{chat_history}\n"},
         ]
         params = {
@@ -541,8 +554,13 @@ class QueryService:
         for attempt in (1, 2):
             try:
                 resp = await llm.chat(llm_messages, **params)
+                if resp["choices"][0].get("finish_reason") == "length":
+                    raise ValueError("Contextualizer response truncated")
                 content = resp["choices"][0]["message"]["content"]
-                return SearchQueries.model_validate_json(_json_slice(content))
+                result = SearchQueries.model_validate_json(_json_slice(content))
+                if result.requires_retrieval and not result.query_list:
+                    result.query_list = [Query(query=last_user)]
+                return result
             except Exception as exc:
                 if attempt == 1:
                     if _is_oversized_query_list_error(exc):
@@ -555,7 +573,14 @@ class QueryService:
                         ]
                         logger.warning("Query generation exceeded the sub-query limit — retrying with coarser coverage")
                     else:
-                        logger.warning("Query generation parse error — retrying", error=str(exc))
+                        llm_messages = [
+                            {
+                                **llm_messages[0],
+                                "content": f"{llm_messages[0]['content']}\n\n{QUERY_CONTEXTUALIZER_TRUNCATED_RETRY_INSTRUCTION}",
+                            },
+                            *llm_messages[1:],
+                        ]
+                        logger.warning("Query generation parse error — retrying with compact JSON", error=str(exc))
                 else:
                     logger.warning(
                         "Query generation failed twice — falling back to raw user query",
@@ -744,7 +769,7 @@ class QueryService:
                 partitions=partition, search_queries=queries, top_k=top_k, filter_params=filter_params
             )
         else:
-            web_results = _dedupe_web(await asyncio.gather(*[self._web.search(q.query) for q in queries.query_list]))
+            web_results = _dedupe_web(await self._search_web(queries))
             chunks = []
 
         if not chunks and not web_results and partition is None:
@@ -852,6 +877,13 @@ class QueryService:
             found = {fid for r in results for fid in r}
         return [fid for fid in dict.fromkeys(file_ids) if fid in found]
 
+    async def _search_web(self, queries: SearchQueries):
+        texts = list(dict.fromkeys(q.query.strip() for q in queries.query_list if q.query.strip()))
+        budget = getattr(getattr(self._config, "websearch", None), "max_queries", 1)
+        # Preserve contextualized facets when combining them to respect the provider budget.
+        groups = [texts[i::budget] for i in range(min(budget, len(texts)))]
+        return await asyncio.gather(*(self._web.search("; ".join(group)) for group in groups))
+
     async def _gather_rag_and_web(self, queries, partition, top_k, filter_params):
         # Fuse the doc branch through retrieve_multi so a partition's rrf_k drives
         # its sub-query fusion here too (#707). Previously this used
@@ -861,7 +893,7 @@ class QueryService:
         rag = self._retrieval.retrieve_multi(
             partitions=partition, search_queries=queries, top_k=top_k, filter_params=filter_params
         )
-        web = asyncio.gather(*[self._web.search(q.query) for q in queries.query_list])
+        web = self._search_web(queries)
         chunks, web_lists = await asyncio.gather(rag, web)
         return chunks, web_lists
 

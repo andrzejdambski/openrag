@@ -146,6 +146,8 @@ paths:
 
 # --- Prompt template filenames ---
 prompts:
+  # Refresh saved defaults only when they still match an older bundled version.
+  refresh_defaults: true
   sys_prompt: sys_prompt_tmpl.txt
   query_contextualizer: query_contextualizer_tmpl.txt
   chunk_contextualizer: chunk_contextualizer_tmpl.txt
@@ -354,7 +356,7 @@ rag:
 
 # --- Web Search ---
 # Env: WEBSEARCH_PROVIDER, WEBSEARCH_API_TOKEN, WEBSEARCH_BASE_URL,
-#      WEBSEARCH_TOP_K, WEBSEARCH_LANG, WEBSEARCH_MAX_TOKENS,
+#      WEBSEARCH_TOP_K, WEBSEARCH_LANG, WEBSEARCH_MAX_TOKENS, WEBSEARCH_MAX_QUERIES,
 #      WEBSEARCH_FETCH_CONTENT, WEBSEARCH_FETCH_MAX_RESULTS,
 #      WEBSEARCH_FETCH_TIMEOUT, WEBSEARCH_FETCH_MAX_TOKENS, WEBSEARCH_FETCH_VERIFY_SSL
 websearch:
@@ -364,6 +366,7 @@ websearch:
   top_k: 5
   lang: fr-FR
   max_tokens: 2000
+  max_queries: 1
   fetch_content: true
   fetch_max_results: 3
   fetch_timeout: 1.0

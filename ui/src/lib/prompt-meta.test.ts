@@ -79,7 +79,8 @@ describe("validatePlaceholders", () => {
       renderPreview(template, "query_contextualizer")
         .filter((segment) => segment.varName === "max_query_subqueries")
         .map((segment) => segment.value),
-    ).toEqual(["8", "8"]);
+    ).toEqual([]);
+    expect(template).toContain("Return no more than 8 sub-queries total");
   });
 
   it("accepts any literal text for verbatim prompt types", () => {

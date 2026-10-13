@@ -47,6 +47,7 @@ _ENV_OVERRIDES: list[tuple[str, str, type]] = [
     ("EMBEDDER_CONCURRENCY", "embedder.embed_concurrency", int),
     # Model endpoint registry
     ("MODEL_ENDPOINT_SYNC_ON_BOOT", "models.sync_on_boot", bool),
+    ("PROMPTS_REFRESH_DEFAULTS", "prompts.refresh_defaults", bool),
     ("READINESS_REQUIRE_EMBEDDER", "models.readiness_requires_embedder", bool),
     # VectorDB
     ("VDB_HOST", "vectordb.host", str),
@@ -175,6 +176,7 @@ _ENV_OVERRIDES: list[tuple[str, str, type]] = [
     ("WEBSEARCH_BASE_URL", "websearch.base_url", str),
     ("WEBSEARCH_TOP_K", "websearch.top_k", int),
     ("WEBSEARCH_LANG", "websearch.lang", str),
+    ("WEBSEARCH_MAX_QUERIES", "websearch.max_queries", int),
     ("WEBSEARCH_MAX_TOKENS", "websearch.max_tokens", int),
     ("WEBSEARCH_FETCH_CONTENT", "websearch.fetch_content", bool),
     ("WEBSEARCH_FETCH_MAX_RESULTS", "websearch.fetch_max_results", int),

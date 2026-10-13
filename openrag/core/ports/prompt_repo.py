@@ -50,7 +50,7 @@ class PromptRepository(ABC):
     async def update_default_content_if_unchanged(
         self, prompt_id: str, expected_name: str, old_content: str, new_content: str
     ) -> bool:
-        """Replace a shipped default only if it still has its observed content."""
+        """Replace a seeded default only if it is still unchanged at write time."""
         ...
 
     @abstractmethod

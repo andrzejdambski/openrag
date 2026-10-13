@@ -18,6 +18,7 @@ from __future__ import annotations
 import hashlib
 import string
 from dataclasses import dataclass
+from hashlib import sha256
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
@@ -222,18 +223,19 @@ class PromptService:
     # ------------------------------------------------------------------
 
     async def seed_defaults(self) -> None:
-        """Create one default library prompt per type from its disk template.
+        """Create defaults and refresh unchanged copies of older bundled seeds.
 
-        Idempotent per type. Only an unchanged shipped query contextualizer
-        default is refreshed; customized prompts and custom prompt directories
-        are left alone. A type whose disk template is missing is skipped with a
-        warning rather than aborting boot.
+        An admin's edits and custom prompt directories survive restarts. A type
+        whose disk template is missing is skipped rather than aborting boot.
         """
         for prompt_type in _TYPE_TO_CONFIG_KEY:
-            existing = await self._repo.get_default(prompt_type)
+            try:
+                existing = await self._repo.get_default(prompt_type)
+            except Exception as exc:
+                logger.warning(f"Could not inspect default prompt for '{prompt_type}': {exc}")
+                continue
             if existing is not None:
-                if prompt_type == PromptType.QUERY_CONTEXTUALIZER.value:
-                    await self._refresh_query_contextualizer_default(existing)
+                await self._refresh_default_if_pristine(prompt_type, existing)
                 continue
             try:
                 content = self._disk_seed(prompt_type)
@@ -271,45 +273,37 @@ class PromptService:
                 continue
             logger.info(f"Seeded default prompt for '{prompt_type}'.")
 
-    async def _refresh_query_contextualizer_default(self, existing: Prompt) -> None:
-        """Refresh a stock default while preserving admin edits and overrides."""
+    async def _refresh_default_if_pristine(self, prompt_type: str, existing: Prompt) -> None:
         if Path(self._config.paths.prompts_dir).resolve() != _DEFAULT_PROMPTS_DIR.resolve():
             return
-        if not existing.is_default or existing.name != "default_query_contextualizer":
+        expected_name = f"default_{prompt_type}"
+        if not existing.is_default or existing.name != expected_name:
             return
-
-        old_hash = hashlib.sha256(existing.content.encode("utf-8")).hexdigest()
-        if old_hash not in _SUPERSEDED_SEED_HASHES[PromptType.QUERY_CONTEXTUALIZER.value]:
+        old_hash = sha256(existing.content.encode("utf-8")).hexdigest()
+        if old_hash not in _SUPERSEDED_SEED_HASHES.get(prompt_type, ()):
             return
-
+        if not self._config.prompts.refresh_defaults:
+            logger.warning(f"Default prompt for '{prompt_type}' is outdated; automatic refresh is disabled.")
+            return
         try:
-            new_content = _validate_and_normalize_content(
-                PromptType.QUERY_CONTEXTUALIZER.value,
-                self._disk_seed(PromptType.QUERY_CONTEXTUALIZER.value),
-            )
+            content = _validate_and_normalize_content(prompt_type, self._disk_seed(prompt_type))
         except (OSError, ValueError, ValidationError) as exc:
-            logger.warning(f"Could not refresh the default query contextualizer: {exc}")
+            logger.warning(f"Could not refresh default prompt for '{prompt_type}': {exc}")
             return
-
-        current_hash = hashlib.sha256(new_content.encode("utf-8")).hexdigest()
-        if current_hash != _CURRENT_SEED_HASHES[PromptType.QUERY_CONTEXTUALIZER.value]:
+        if sha256(content.encode("utf-8")).hexdigest() != _CURRENT_SEED_HASHES[prompt_type]:
             logger.warning(
-                "Bundled query contextualizer differs from its recorded hash; leaving the default unchanged."
+                f"Bundled template for '{prompt_type}' differs from its recorded hash; leaving old default in place."
             )
             return
-
         try:
             updated = await self._repo.update_default_content_if_unchanged(
-                existing.id,
-                "default_query_contextualizer",
-                existing.content,
-                new_content,
+                existing.id, expected_name, existing.content, content
             )
         except Exception as exc:
-            logger.warning(f"Could not refresh the default query contextualizer: {exc}")
+            logger.warning(f"Could not refresh default prompt for '{prompt_type}': {exc}")
             return
         if updated:
-            logger.info(f"Refreshed unchanged default query contextualizer from hash {old_hash}.")
+            logger.info(f"Refreshed unchanged default prompt for '{prompt_type}' from hash {old_hash}.")
 
     def _disk_seed(self, prompt_type: str) -> str:
         """Read a prompt type's bundled template from disk (honours PROMPTS_DIR)."""

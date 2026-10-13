@@ -6,7 +6,7 @@ import logging
 from datetime import UTC, datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 logger = logging.getLogger(__name__)
 
@@ -117,6 +117,19 @@ class SearchQueries(BaseModel):
         default=True,
         description="Whether the user's request needs document retrieval.",
     )
+
+    @field_validator("query_list", mode="before")
+    @classmethod
+    def remove_blank_queries(cls, value: Any) -> Any:
+        if not isinstance(value, (list, tuple)):
+            return value
+        result = []
+        for entry in value:
+            text = entry.query if isinstance(entry, Query) else entry.get("query") if isinstance(entry, dict) else None
+            if isinstance(text, str) and not text.strip():
+                continue
+            result.append(entry)
+        return result
 
     def __str__(self) -> str:
         return " --- ".join(str(q) for q in self.query_list)
