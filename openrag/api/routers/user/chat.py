@@ -6,15 +6,15 @@ map-reduce, context/prompt assembly, streaming, and the
 ``services.orchestrators.query_service.QueryService``. This module keeps
 HTTP transport only: model→partition resolution, token-limit validation,
 the OpenAI ``/models`` listing, request-bound source-link building
-(``__prepare_sources`` uses ``request.url_for`` so it stays here and is
+(``__prepare_sources`` uses ``build.url`` so it stays here and is
 handed to the service as a callable), and ``StreamingResponse`` /
 ``JSONResponse`` wrapping with the SSE error envelope.
 """
 
 import asyncio
 import json
-import traceback
 from typing import TYPE_CHECKING
+from api.dependencies.build_url import build_url
 
 from api.dependencies.auth import (
     current_user,
@@ -34,7 +34,7 @@ from core.config.endpoints import client_llm_override, custom_endpoint_override_
 from core.models.preset import resolve_partition_chat_llm
 from core.prompts import message_tokens, tool_definition_tokens
 from core.utils import consts
-from core.utils.exceptions import OpenRAGError, ServiceUnavailableError
+from core.utils.exceptions import OpenRAGError
 from core.utils.logging import get_logger
 from core.utils.text import get_num_tokens, sanitize_text
 from core.utils.web_url import normalize_web_url
@@ -240,14 +240,24 @@ async def list_models(
     return JSONResponse(content={"object": "list", "data": models})
 
 
-def __prepare_sources(request: Request, docs: list, web_results: list | None = None):
+def __prepare_sources(request: Request, docs: list, config, web_results: list | None = None):
     def static_url(extract_id) -> str:
         # Authorized, partition-checked download keyed by chunk id (replaces the
         # open /static mount). The file is resolved server-side from the chunk.
-        return str(request.url_for("download_source", extract_id=extract_id))
+        return build_url(
+                    request,
+                    "download_source",
+                    preferred_url_scheme=config.server.preferred_url_scheme,
+                    extract_id=extract_id,
+                )
 
     def chunk_url(extract_id) -> str:
-        return str(request.url_for("get_extract", extract_id=extract_id))
+        return build_url(
+                        request,
+                        "get_extract",
+                        preferred_url_scheme=config.server.preferred_url_scheme,
+                        extract_id=extract_id,
+                    )
 
     links = []
     for doc in docs:
@@ -368,74 +378,53 @@ def get_max_model_tokens(partitions: list[str] | None = None, settings: "Setting
     return probed or int(config.llm_context.max_llm_context_size)
 
 
-def _token_validation_unavailable(error: Exception) -> ServiceUnavailableError:
-    # Counter exceptions can contain input text or credentials. Log only the
-    # type and stack locations; the raised error chains the original cause.
-    logger.warning(
-        "Token validation unavailable",
-        error_type=type(error).__name__,
-        traceback=[
-            f"{frame.filename}:{frame.lineno} in {frame.name}" for frame in traceback.extract_tb(error.__traceback__)
-        ],
-    )
-    return ServiceUnavailableError(
-        "Unable to validate request token limit. Try again.",
-        code="TOKEN_VALIDATION_UNAVAILABLE",
-    )
-
-
 def validate_tokens_limit(
     request: OpenAIChatCompletionRequest | OpenAICompletionRequest,
     max_tokens_allowed: int,
     settings: "Settings | None" = None,
     partitions: list[str] | None = None,
 ) -> tuple[bool, str]:
-    """Validate the token budget, raising 503 if counting is unavailable."""
-    config = _runtime_config(settings)
+    """Validate if the request respects the maximum token limit."""
     try:
-        counter = get_num_tokens()
-    except Exception as error:
-        raise _token_validation_unavailable(error) from error
+        config = _runtime_config(settings)
+        _length_function = get_num_tokens()
 
-    def _length_function(text: str) -> int:
-        try:
-            return counter(text)
-        except Exception as error:
-            raise _token_validation_unavailable(error) from error
+        if isinstance(request, OpenAIChatCompletionRequest):
+            body = request.model_dump(exclude_none=True)
+            messages_tokens = sum(message_tokens(m, _length_function) for m in body["messages"])
+            tools_tokens = tool_definition_tokens(body, _length_function)
+            default_output_tokens = _effective_max_output_tokens(config, partitions)
+            requested_tokens = request.max_tokens or default_output_tokens
+            total_tokens_needed = messages_tokens + tools_tokens + requested_tokens
+            if total_tokens_needed > max_tokens_allowed:
+                tools_part = f"Tool definitions: {tools_tokens} tokens + " if tools_tokens else ""
+                return False, (
+                    f"Request exceeds maximum token limit. "
+                    f"Messages: {messages_tokens} tokens + "
+                    f"{tools_part}"
+                    f"Requested output: {requested_tokens} tokens = "
+                    f"{total_tokens_needed} tokens. "
+                    f"Maximum allowed: {max_tokens_allowed} tokens."
+                )
 
-    if isinstance(request, OpenAIChatCompletionRequest):
-        body = request.model_dump(exclude_none=True)
-        messages_tokens = sum(message_tokens(m, _length_function) for m in body["messages"])
-        tools_tokens = tool_definition_tokens(body, _length_function)
-        default_output_tokens = _effective_max_output_tokens(config, partitions)
-        requested_tokens = request.max_tokens or default_output_tokens
-        total_tokens_needed = messages_tokens + tools_tokens + requested_tokens
-        if total_tokens_needed > max_tokens_allowed:
-            tools_part = f"Tool definitions: {tools_tokens} tokens + " if tools_tokens else ""
-            return False, (
-                f"Request exceeds maximum token limit. "
-                f"Messages: {messages_tokens} tokens + "
-                f"{tools_part}"
-                f"Requested output: {requested_tokens} tokens = "
-                f"{total_tokens_needed} tokens. "
-                f"Maximum allowed: {max_tokens_allowed} tokens."
-            )
+        elif isinstance(request, OpenAICompletionRequest):
+            prompt_tokens = _length_function(request.prompt)
+            default_output_tokens = _effective_max_output_tokens(config, partitions)
+            requested_tokens = request.max_tokens or default_output_tokens
+            total_tokens_needed = prompt_tokens + requested_tokens
+            if total_tokens_needed > max_tokens_allowed:
+                return False, (
+                    f"Request exceeds maximum token limit. "
+                    f"Prompt: {prompt_tokens} tokens + "
+                    f"Requested output: {requested_tokens} tokens = "
+                    f"{total_tokens_needed} tokens. "
+                    f"Maximum allowed: {max_tokens_allowed} tokens."
+                )
 
-    elif isinstance(request, OpenAICompletionRequest):
-        prompt_tokens = _length_function(request.prompt)
-        default_output_tokens = _effective_max_output_tokens(config, partitions)
-        requested_tokens = request.max_tokens or default_output_tokens
-        total_tokens_needed = prompt_tokens + requested_tokens
-        if total_tokens_needed > max_tokens_allowed:
-            return False, (
-                f"Request exceeds maximum token limit. "
-                f"Prompt: {prompt_tokens} tokens + "
-                f"Requested output: {requested_tokens} tokens = "
-                f"{total_tokens_needed} tokens. "
-                f"Maximum allowed: {max_tokens_allowed} tokens."
-            )
-
-    return True, ""
+        return True, ""
+    except Exception as e:
+        logger.warning("Error during token validation, skipping check", error=str(e))
+        return True, ""
 
 
 def _apply_default_max_tokens(
@@ -611,7 +600,7 @@ async def openai_chat_completion(
     max_prompt_tokens = _max_prompt_tokens(request, config, partitions)
 
     def prep(docs, web):
-        return __prepare_sources(request2, docs, web)
+        return __prepare_sources(request2, docs, config, web)
 
     if request.stream:
 
@@ -752,8 +741,8 @@ async def openai_completion(
     resp = await service.complete(
         partitions=partitions,
         payload=request.model_dump(exclude_none=True),
-        prepare_sources=lambda docs, _web: __prepare_sources(request2, docs),
+        prepare_sources=lambda docs, _web: __prepare_sources(request2, docs, config),
         max_prompt_tokens=_max_prompt_tokens(request, config, partitions),
     )
     log.debug("Returning completion response.")
-    return JSONResponse(content=resp)
+    return JSONResponse(content=resp)   

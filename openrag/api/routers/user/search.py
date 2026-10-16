@@ -11,6 +11,7 @@ shaping (domain ``Chunk`` → ``{link, metadata, content}``).
 
 import uuid
 from typing import Annotated
+from api.dependencies.build_url import build_url
 
 from api.dependencies.auth import (
     current_user_or_admin_partitions_list,
@@ -19,12 +20,6 @@ from api.dependencies.auth import (
 )
 from api.dependencies.files import validate_file_id
 from api.dependencies.retrieval_diagnostics import get_retrieval_diagnostics_guard
-from api.routers.user.chat import check_tokens_limit
-from api.schemas.user.chat import OpenAIChatCompletionRequest, OpenAIMessage
-from api.schemas.user.retrieval_diagnostics import (
-    RetrievalDiagnosticRequest,
-    RetrievalDiagnosticResponse,
-)
 from core.retrieval.trace import (
     TRACE_FILE_SCOPE_KIND_KEY,
     RetrievalDiagnosticsContext,
@@ -35,7 +30,6 @@ from core.utils.filter_validation import validate_search_filter
 from core.utils.logging import get_logger
 from di.providers import (
     get_config,
-    get_query_service,
     get_retrieval_service,
     get_retrieval_snapshot_service,
     get_workspace_service,
@@ -104,7 +98,7 @@ class CommonSearchParams:
         self.include_retrieval_trace = include_retrieval_trace
 
 
-def _documents(request: Request, chunks) -> list[dict]:
+def _documents(request: Request, chunks, config) -> list[dict]:
     docs: list[dict] = []
     for c in chunks:
         # Restore the legacy response metadata shape. Chunk.from_langchain
@@ -115,13 +109,17 @@ def _documents(request: Request, chunks) -> list[dict]:
         meta = c.to_langchain().metadata
         docs.append(
             {
-                "link": str(request.url_for("get_extract", extract_id=meta.get("_id") or c.id)),
+                "link": build_url(
+                            request,
+                            "get_extract",
+                            preferred_url_scheme=config.server.preferred_url_scheme,
+                            extract_id=meta.get("_id") or c.id,
+                        ),
                 "metadata": meta,
                 "content": c.text,
             }
         )
     return docs
-
 
 def _new_trace(request: Request, search_params: CommonSearchParams) -> RetrievalTraceBuilder | None:
     if not search_params.include_retrieval_trace:
@@ -163,8 +161,9 @@ async def _response_payload(
     effective_options: dict[str, object],
     filter_expression: str | None = None,
     filter_params: dict | None = None,
+    config=None,
 ) -> dict[str, object]:
-    payload: dict[str, object] = {"documents": _documents(request, chunks)}
+    payload: dict[str, object] = {"documents": _documents(request, chunks, config)}
     if trace is None:
         return payload
     fingerprint_options = dict(effective_options)
@@ -216,50 +215,6 @@ async def retrieval_snapshot(
 ):
     await diagnostics_guard.authorize(partition_viewer)
     return await service.snapshot(partition, include_document_ids=include_document_ids)
-
-
-@router.post(
-    "/partition/{partition}/diagnostics",
-    response_model=RetrievalDiagnosticResponse,
-    description="Run administrator-only retrieval diagnostics without answer generation.",
-)
-async def retrieval_diagnostics(
-    request: Request,
-    partition: str,
-    payload: RetrievalDiagnosticRequest,
-    partition_viewer=Depends(require_partition_viewer),
-    service=Depends(get_query_service),
-    config=Depends(get_config),
-    diagnostics_guard=Depends(get_retrieval_diagnostics_guard),
-):
-    await diagnostics_guard.authorize(partition_viewer)
-    await service.refresh_partition_configs()
-    token_request = OpenAIChatCompletionRequest(
-        messages=[OpenAIMessage(**message.model_dump()) for message in payload.messages],
-        max_tokens=config.rag.max_contextualized_query_len,
-    )
-    check_tokens_limit(
-        token_request,
-        logger.bind(endpoint="/search/partition/{partition}/diagnostics"),
-        config,
-        partitions=[partition],
-    )
-    request_id = getattr(request.state, "request_id", None) or request.headers.get("X-Request-ID")
-    trace = await service.diagnose_retrieval(
-        partitions=[partition],
-        messages=[message.model_dump() for message in payload.messages],
-        query_mode=payload.query_mode,
-        top_k=payload.top_k,
-        similarity_threshold=payload.similarity_threshold,
-        disable_reranker=payload.disable_reranker,
-        disable_expansion=payload.disable_expansion,
-        request_id=request_id,
-    )
-    return RetrievalDiagnosticResponse(
-        partition=partition,
-        query_mode=payload.query_mode,
-        retrieval_trace=trace,
-    )
 
 
 @router.get(
@@ -322,6 +277,7 @@ async def search_multiple_partitions(
     service=Depends(get_retrieval_service),
     workspaces=Depends(get_workspace_service),
     diagnostics_guard=Depends(get_retrieval_diagnostics_guard),
+    config=Depends(get_config),
 ):
     if partitions == ["all"]:
         partitions = user_partitions
@@ -375,6 +331,7 @@ async def search_multiple_partitions(
             effective_options,
             filter_expression=search_params.filter,
             filter_params=filter_params,
+            config=config,
         ),
     )
 
@@ -429,6 +386,7 @@ async def search_one_partition(
     service=Depends(get_retrieval_service),
     workspaces=Depends(get_workspace_service),
     diagnostics_guard=Depends(get_retrieval_diagnostics_guard),
+    config=Depends(get_config),
 ):
     log = logger.bind(
         partition=partition,
@@ -472,6 +430,7 @@ async def search_one_partition(
             effective_options,
             filter_expression=search_params.filter,
             filter_params=filter_params,
+            config=config,
         ),
     )
 
@@ -520,6 +479,7 @@ async def search_file(
     partition_viewer=Depends(require_partition_viewer),
     service=Depends(get_retrieval_service),
     diagnostics_guard=Depends(get_retrieval_diagnostics_guard),
+    config=Depends(get_config),
 ):
     log = logger.bind(
         partition=partition, file_id=file_id, query_len=len(search_params.text), top_k=search_params.top_k
@@ -558,5 +518,6 @@ async def search_file(
             effective_options,
             filter_expression=search_params.filter,
             filter_params=filter_params,
+            config=config,
         ),
     )
